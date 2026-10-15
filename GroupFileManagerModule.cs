@@ -35,7 +35,7 @@ public class GroupFileManagerConfig
     public bool DebugMode { get; set; } = false;
 
     [DisplayName("基础·协议端类型")]
-    [Description("auto=自动探测 / napcat / llonebot，影响移动与重命名接口的参数格式")]
+    [Description("auto=自动探测（默认）/ napcat / llonebot / snowluma。影响移动文件接口的参数格式：NapCat 用 current/target_parent_directory，LLOneBot 与 SnowLuma 用 parent/target_directory")]
     public string ApiProvider { get; set; } = "auto";
 
     // ---- 下载设置 ----
@@ -98,7 +98,7 @@ public class GroupFileManagerConfig
 }
 
 [Module("群文件管家",
-    "QQ群文件管理：列表/搜索/重命名/文件夹/删除/移动/异步下载，黑白名单双权限模式，自动适配NapCat与LLOneBot",
+    "QQ群文件管理：列表/搜索/重命名/文件夹/删除/移动/异步下载，黑白名单双权限模式，自动适配NapCat、LLOneBot与SnowLuma",
     defaultCategory: "苏染的工具")]
 public class GroupFileManagerModule(
     XmlFunctionCaller functionCaller,
@@ -126,8 +126,12 @@ public class GroupFileManagerModule(
     string downloadDirectory = "";
     List<string> allowedExtensions = new();
     long maxFileSizeBytes;
-    // API 提供者："auto" / "napcat" / "llonebot"，移动文件成功后自动记录
+    // 协议端类型："auto" / "napcat" / "llonebot" / "snowluma"，来自配置
     string apiProvider = "auto";
+    // 移动接口实测生效的参数格式：""=未试出来，napcat / onebot（LLOneBot 与 SnowLuma 同格式）
+    string moveParameterStyle = "";
+    // get_version_info 识别出的协议端署名，只用于日志与错误提示
+    static string providerName = "";
 
     // ============================================================
     // 生命周期
@@ -147,7 +151,7 @@ public class GroupFileManagerModule(
     protected override Task OnStart()
     {
         apiProvider = Configuration.ApiProvider.Trim().ToLowerInvariant();
-        if (apiProvider != "napcat" && apiProvider != "llonebot")
+        if (apiProvider != "napcat" && apiProvider != "llonebot" && apiProvider != "snowluma")
         {
             apiProvider = "auto";
         }
@@ -181,6 +185,7 @@ public class GroupFileManagerModule(
             logger.LogInformation("[文件管家] 白名单模式，允许的群: {Groups}", Configuration.EnabledGroups);
         }
         StartReceiveLoop();
+        StartProviderCheck();
         return Task.CompletedTask;
     }
 
@@ -193,6 +198,7 @@ public class GroupFileManagerModule(
             sharedConnection = null;
             pendingResponses.Clear();
             receiveLoopStarted = false;
+            providerName = "";
         }
         finally
         {
@@ -360,6 +366,12 @@ public class GroupFileManagerModule(
             string detail = root.TryGetProperty("message", out JsonElement messageElement) && messageElement.ValueKind == JsonValueKind.String
                 ? messageElement.GetString() ?? ""
                 : "未知错误";
+            // 1404 = 动作名在该协议端不存在（三端都有的接口不多，文件夹重命名只有 LLOneBot/SnowLuma 有）
+            if (retcode == 1404)
+            {
+                detail += "（" + (providerName.Length > 0 ? providerName : "该协议端")
+                    + " 未实现该接口，请检查协议端设置或更换支持的协议端）";
+            }
             throw new Exception(operationName + "失败：" + detail);
         }
         return root.TryGetProperty("data", out JsonElement dataElement) ? dataElement.Clone() : JsonDocument.Parse("null").RootElement.Clone();
@@ -807,97 +819,118 @@ public class GroupFileManagerModule(
     }
 
     // ============================================================
-    // 协议端自适应（NapCat / LLOneBot 参数格式差异）
+    // 协议端自适应（NapCat / LLOneBot / SnowLuma 参数格式差异）
     // ============================================================
 
-    // 依次尝试多种动作参数组合，全部失败返回最后一次的错误信息
-    async Task<(bool Success, string Message)> ProbeActionVariantsAsync(
-        List<(string Action, JsonObject Parameters)> attempts, string targetDescription)
+    // 启动后识别一次协议端：三端都回 app_name，go-cqhttp 系才回 name/vendor，两种都取
+    void StartProviderCheck()
     {
-        string lastMessage = "";
-        foreach ((string action, JsonObject parameters) in attempts)
+        Task.Run(async () =>
         {
             try
             {
-                LogDebug("尝试接口: " + action);
-                string response = await CallActionAsync(action, parameters);
-                JsonElement data = ParseActionResponse(response, action);
-                LogDebug("重命名成功: " + targetDescription);
-                return (true, "");
+                await Task.Delay(TimeSpan.FromSeconds(5), DestroyCancellationToken);
+                string response = await CallActionAsync("get_version_info", new JsonObject());
+                JsonElement data = ParseActionResponse(response, "获取协议端版本");
+                providerName = (GetStringField(data, "app_name") + " " + GetStringField(data, "name")
+                    + " " + GetStringField(data, "vendor")).Trim();
+                logger.LogInformation("[文件管家] 协议端：{Provider} {Version}",
+                    providerName.Length > 0 ? providerName : "未识别", GetStringField(data, "app_version"));
+                if (apiProvider == "auto")
+                {
+                    apiProvider = AnchorProviderOf(providerName);
+                }
             }
-            catch (Exception attemptError)
+            catch (Exception versionError)
             {
-                lastMessage = attemptError.Message;
+                logger.LogInformation("[文件管家] 未能识别协议端：{Message}", versionError.Message);
             }
-        }
-        return (false, lastMessage + "（当前协议端可能不支持该接口：NapCat 支持文件重命名，LLOneBot 支持文件夹重命名）");
+        }, DestroyCancellationToken);
     }
 
-    // 移动文件（NapCat 与 LLOneBot 参数名不同），auto 模式自动探测并记录
+    static string AnchorProviderOf(string identifiedName)
+    {
+        string lower = identifiedName.ToLowerInvariant();
+        if (lower.Contains("napcat"))
+        {
+            return "napcat";
+        }
+        if (lower.Contains("llonebot"))
+        {
+            return "llonebot";
+        }
+        if (lower.Contains("snowluma"))
+        {
+            return "snowluma";
+        }
+        return "auto";
+    }
+
+    // NapCat 的 file_id 是它自己内存里编码的临时标识（约24小时过期、NapCat 重启即失效），
+    // 拿旧 id 操作时它抛 'real fileUUID not found!'，不解释一句看起来像插件坏了
+    static string ExplainFileIdFailure(string message)
+    {
+        if (message.Contains("fileUUID", StringComparison.OrdinalIgnoreCase) == false)
+        {
+            return message;
+        }
+        return message + "（NapCat 的 file_id 是协议端内存里的临时标识，重新搜索文件拿最新 id 再试）";
+    }
+
+    // 移动文件：NapCat 用 current/target_parent_directory，LLOneBot 与 SnowLuma 用 parent/target_directory。
+    // 认得出协议端就只发对的那一种，认不出时两种依次试并把试出来的格式记下来。
     async Task<(bool Success, string Message)> MoveFileAsync(
         long groupId, string fileUuid, string currentFolderId, string targetFolderId, string fileName)
     {
         string cleanCurrent = currentFolderId == "/" ? "/" : currentFolderId.TrimStart('/');
         string cleanTarget = targetFolderId == "/" ? "/" : targetFolderId.TrimStart('/');
 
-        JsonObject BuildParameters(string provider)
+        // 已经试出来的格式不再浪费一次失败；否则按协议端排首选，两种都留一次机会
+        // （配置填错端时也能靠回退成功，不至于把移动功能锁死）
+        List<string> styles = moveParameterStyle.Length > 0
+            ? new List<string> { moveParameterStyle }
+            : apiProvider == "napcat"
+                ? new List<string> { "napcat", "onebot" }
+                : apiProvider is "llonebot" or "snowluma"
+                    ? new List<string> { "onebot", "napcat" }
+                    : new List<string> { "napcat", "onebot" };
+
+        string lastMessage = "";
+        foreach (string style in styles)
         {
-            if (provider == "llonebot")
-            {
-                return new JsonObject
+            JsonObject parameters = style == "onebot"
+                ? new JsonObject
                 {
                     ["group_id"] = groupId,
                     ["file_id"] = fileUuid,
                     ["parent_directory"] = cleanCurrent,
                     ["target_directory"] = cleanTarget
+                }
+                : new JsonObject
+                {
+                    ["group_id"] = groupId,
+                    ["file_id"] = fileUuid,
+                    ["current_parent_directory"] = cleanCurrent,
+                    ["target_parent_directory"] = cleanTarget
                 };
-            }
-            return new JsonObject
-            {
-                ["group_id"] = groupId,
-                ["file_id"] = fileUuid,
-                ["current_parent_directory"] = cleanCurrent,
-                ["target_parent_directory"] = cleanTarget
-            };
-        }
-
-        string firstProvider = apiProvider == "auto" ? "napcat" : apiProvider;
-        try
-        {
-            LogDebug("尝试 " + firstProvider + " 格式移动文件: " + fileName);
-            string response = await CallActionAsync("move_group_file", BuildParameters(firstProvider));
-            ParseActionResponse(response, "移动文件");
-            if (apiProvider == "auto")
-            {
-                apiProvider = firstProvider;
-                logger.LogInformation("[文件管家] 自适应检测到 API 提供者: {Provider}", apiProvider);
-            }
-            return (true, "");
-        }
-        catch (Exception firstError)
-        {
-            // 参数格式不匹配或自动模式，回退另一种格式
-            string fallbackProvider = firstProvider == "napcat" ? "llonebot" : "napcat";
-            bool needFallback = apiProvider == "auto"
-                || firstError.Message.Contains("parent_directory")
-                || firstError.Message.Contains("target_directory");
-            if (needFallback == false)
-            {
-                return (false, firstError.Message);
-            }
             try
             {
-                string fallbackResponse = await CallActionAsync("move_group_file", BuildParameters(fallbackProvider));
-                ParseActionResponse(fallbackResponse, "移动文件");
-                apiProvider = fallbackProvider;
-                logger.LogInformation("[文件管家] 自适应切换 API 提供者: {Provider}", apiProvider);
+                LogDebug("尝试 " + style + " 格式移动文件: " + fileName);
+                string response = await CallActionAsync("move_group_file", parameters);
+                ParseActionResponse(response, "移动文件");
+                if (moveParameterStyle != style)
+                {
+                    moveParameterStyle = style;
+                    logger.LogInformation("[文件管家] 移动接口参数格式：{Style}", style);
+                }
                 return (true, "");
             }
-            catch (Exception fallbackError)
+            catch (Exception moveError)
             {
-                return (false, fallbackError.Message);
+                lastMessage = moveError.Message;
             }
         }
+        return (false, ExplainFileIdFailure(lastMessage));
     }
 
     // ============================================================
@@ -1137,7 +1170,7 @@ public class GroupFileManagerModule(
         }
 
         int successCount = 0;
-        int failCount = 0;
+        List<string> failures = new();
         foreach (string fileId in deleteIds)
         {
             try
@@ -1151,14 +1184,14 @@ public class GroupFileManagerModule(
                 ParseActionResponse(response, "删除文件");
                 successCount++;
             }
-            catch
+            catch (Exception deleteError)
             {
-                failCount++;
+                failures.Add(fileId + "：" + ExplainFileIdFailure(deleteError.Message));
             }
         }
         ClearCache(groupId);
 
-        if (successCount == deleteIds.Count)
+        if (failures.Count == 0)
         {
             if (deleteIds.Count == 1)
             {
@@ -1169,15 +1202,21 @@ public class GroupFileManagerModule(
             {
                 interactor.Poke("✅ 成功删除 " + successCount + " 个文件");
             }
+            return;
         }
-        else if (successCount > 0)
+        // 删除失败必须带原因，否则用户只能看到"删除失败"无从下手
+        StringBuilder result = new();
+        if (successCount > 0)
         {
-            interactor.Poke("✅ 成功删除 " + successCount + " 个文件\n❌ " + failCount + " 个文件删除失败");
+            result.Append("⚠️ 成功删除 ").Append(successCount).Append(" 个文件，")
+                .Append(failures.Count).Append(" 个失败：\n");
         }
         else
         {
-            interactor.Poke("❌ 删除失败");
+            result.Append("❌ 删除失败：\n");
         }
+        result.Append(string.Join("\n", failures.Take(3)));
+        interactor.Poke(result.ToString());
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1220,7 +1259,7 @@ public class GroupFileManagerModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("重命名QQ群文件。优先用fileId；按fileName定位时要求群内唯一。注意NapCat支持文件重命名，其他协议端可能不支持")]
+    [Description("重命名QQ群文件。优先用fileId；按fileName定位时要求群内唯一。NapCat、LLOneBot、SnowLuma 三端均支持文件重命名")]
     public async Task RenameGroupFile(
         [Description("QQ群号")] long groupId,
         [Description("新文件名（保留扩展名）")] string newName,
@@ -1295,37 +1334,30 @@ public class GroupFileManagerModule(
         }
 
         string cleanDirectory = parentFolderId == "/" ? "/" : parentFolderId.TrimStart('/');
-        JsonObject primaryParameters = new()
+        // 三端一致：rename_group_file 收 file_id + current_parent_directory + new_name
+        JsonObject parameters = new()
         {
             ["group_id"] = groupId,
             ["file_id"] = targetFileId,
             ["current_parent_directory"] = cleanDirectory,
             ["new_name"] = trimmedName
         };
-        JsonObject alternateParameters = new()
+        try
         {
-            ["group_id"] = groupId,
-            ["file_id"] = targetFileId,
-            ["current_parent_directory"] = cleanDirectory,
-            ["new_file_name"] = trimmedName
-        };
-        List<(string Action, JsonObject Parameters)> attempts = new()
+            string response = await CallActionAsync("rename_group_file", parameters);
+            ParseActionResponse(response, "重命名文件");
+        }
+        catch (Exception renameError)
         {
-            ("rename_group_file", primaryParameters),
-            ("rename_group_file", alternateParameters)
-        };
-        (bool Success, string Message) renameResult = await ProbeActionVariantsAsync(attempts, "文件 " + targetFileId);
-        if (renameResult.Success)
-        {
-            ClearCache(groupId);
-            interactor.Poke("✅ 已将文件 " + oldName + " 重命名为 " + trimmedName);
+            interactor.Poke("❌ 重命名失败: " + ExplainFileIdFailure(renameError.Message));
             return;
         }
-        interactor.Poke("❌ 重命名失败: " + renameResult.Message);
+        ClearCache(groupId);
+        interactor.Poke("✅ 已将文件 " + oldName + " 重命名为 " + trimmedName);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("重命名QQ群文件夹。优先用folderId，也可传folderName定位。注意LLOneBot支持文件夹重命名，其他协议端可能不支持")]
+    [Description("重命名QQ群文件夹。优先用folderId，也可传folderName定位。注意文件夹重命名只有 LLOneBot/SnowLuma 支持，NapCat 未实现该接口")]
     public async Task RenameGroupFolder(
         [Description("QQ群号")] long groupId,
         [Description("新文件夹名")] string newFolderName,
@@ -1374,31 +1406,25 @@ public class GroupFileManagerModule(
             return;
         }
 
-        JsonObject primaryParameters = new()
+        // LLOneBot 与 SnowLuma 的动作名都是 rename_group_file_folder（NapCat 没有这个动作，会回 1404）
+        JsonObject parameters = new()
         {
             ["group_id"] = groupId,
             ["folder_id"] = targetId,
             ["new_folder_name"] = trimmedName
         };
-        JsonObject alternateParameters = new()
+        try
         {
-            ["group_id"] = groupId,
-            ["folder_id"] = targetId,
-            ["name"] = trimmedName
-        };
-        List<(string Action, JsonObject Parameters)> attempts = new()
+            string response = await CallActionAsync("rename_group_file_folder", parameters);
+            ParseActionResponse(response, "重命名文件夹");
+        }
+        catch (Exception renameError)
         {
-            ("rename_group_folder", primaryParameters),
-            ("rename_group_folder", alternateParameters)
-        };
-        (bool Success, string Message) renameResult = await ProbeActionVariantsAsync(attempts, "文件夹 " + targetId);
-        if (renameResult.Success)
-        {
-            ClearCache(groupId);
-            interactor.Poke("✅ 已将文件夹 " + oldName + " 重命名为 " + trimmedName);
+            interactor.Poke("❌ 重命名失败: " + renameError.Message);
             return;
         }
-        interactor.Poke("❌ 重命名失败: " + renameResult.Message);
+        ClearCache(groupId);
+        interactor.Poke("✅ 已将文件夹 " + oldName + " 重命名为 " + trimmedName);
     }
 
     [XmlFunction(FunctionMode.OneShot)]

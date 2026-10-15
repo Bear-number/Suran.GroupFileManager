@@ -1,10 +1,10 @@
 
 # Suran.GroupFileManager
 
-QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文件列表/搜索/重命名/文件夹管理/删除/移动/异步下载。所有操作通过 OneBot 正向 WebSocket 直发协议端（常驻接收循环 + 断线重连），自动适配 NapCat 与 LLOneBot 的接口差异。
+QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文件列表/搜索/重命名/文件夹管理/删除/移动/异步下载。所有操作通过 OneBot 正向 WebSocket 直发协议端（常驻接收循环 + 断线重连），自动适配 NapCat、LLOneBot 与 SnowLuma 的接口差异。
 
 ## 版本
-4.0.0（对应 Alife 客户端 4.2.x）
+4.1.0（对应 Alife 客户端 4.2.x）
 
 ## 依赖
 - Alife.Function.FunctionCaller
@@ -15,7 +15,7 @@ QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文�
 | OneBotWsUrl | ws://127.0.0.1:3001 | OneBot 正向 WebSocket 地址 |
 | MaxFilesList | 20 | 列出/搜索时最多显示条数 |
 | DebugMode | 关 | 调试日志（API调用/搜索/缓存过程） |
-| ApiProvider | auto | 协议端类型：auto 自动探测 / napcat / llonebot（影响移动与重命名接口格式） |
+| ApiProvider | auto | 协议端类型：auto 自动识别 / napcat / llonebot / snowluma（影响移动文件接口参数格式） |
 | DownloadPath | files | 下载保存目录，相对存储目录（禁止..和盘符），即 {存储目录}/files |
 | MaxFileSizeMb | 100 | 下载大小上限，0不限制 |
 | AllowedExtensions | 空 | 下载扩展名白名单，逗号分隔，留空允许全部 |
@@ -32,8 +32,8 @@ QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文�
 - DeleteFolder(groupId, folderName, folderId) - 删除空文件夹
 - DeleteGroupFiles(groupId, fileIds, fileNames) - 删除文件（批量），fileIds/fileNames用英文逗号分隔；按名删除时同名多处会拒绝并列出位置，防止连坐误删
 - MoveGroupFile(groupId, fileName, folderName) - 移动文件，folderName填'根目录'或'/'到根目录
-- RenameGroupFile(groupId, newName, fileId, fileName) - 重命名文件（NapCat 支持）
-- RenameGroupFolder(groupId, newFolderName, folderId, folderName) - 重命名文件夹（LLOneBot 支持）
+- RenameGroupFile(groupId, newName, fileId, fileName) - 重命名文件（三端都支持）
+- RenameGroupFolder(groupId, newFolderName, folderId, folderName) - 重命名文件夹（仅 LLOneBot/SnowLuma，NapCat 无此接口）
 - DownloadGroupFile(groupId, fileName) - 异步下载到 {存储目录}/下载目录，完成后主动通知AI
 - CheckDownloadTask(taskId) - 查询下载任务状态
 
@@ -45,9 +45,21 @@ QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文�
 - 文件夹内容缓存 5 秒，写操作后主动清除
 - 文件夹内容拉取失败自动重试（2次，退避0.5s）
 - 搜索/全量收集按文件夹顺序逐个请求（NapCat/LLOneBot 并发限流规避），文件夹声称有文件却拉空时日志告警
-- 移动文件自动探测 NapCat/LLOneBot 参数格式并记忆；重命名接口多参数变体依次尝试
+- 移动文件按协议端排参数格式首选、另一种兜底，实测生效的格式会记住；重命名按三端源码直接用固定参数
 - 下载双重校验：创建任务前按扩展名/文件大小预检，下载中按 Content-Length 二次校验
 - 文件名非法字符清洗、重名自动加时间戳
+
+## 三端兼容（NapCat / LLOneBot / SnowLuma）
+接口差异全部对着三端源码核对，不是猜的：
+- 启动后 `get_version_info` 识别协议端（三端都回 `app_name`），日志署名并在 retcode 1404 时提示「X 未实现该接口」
+- **移动文件**参数名分两种：NapCat `current_parent_directory`/`target_parent_directory`，LLOneBot 与 SnowLuma 同为 `parent_directory`/`target_directory`。按识别出的端排首选、另一种兜底（配置填错端也能靠回退成功），实测生效的格式记住后不再浪费一次失败
+- **文件夹重命名**动作名是 `rename_group_file_folder`（此前用的 `rename_group_folder` 三端都不存在，等于从来没生效过），NapCat 未实现该接口，会明确报「X 未实现该接口」
+- **文件重命名**三端都支持，参数固定 `file_id` + `current_parent_directory` + `new_name`（不再盲试 `new_file_name` 这类不存在的变体）
+- SnowLuma 的删除文件夹注册名是 `delete_group_file_folder`，`delete_group_folder` 是它的别名，现名可用
+- `delete_group_file` 的 `busid` 只有 LLOneBot 收，且可选（默认 102），无需补传
+- 文件/文件夹定位字段两端不一致（NapCat 文件夹回 `folder`，其余回 `folder_id`；名称 `name` / `file_name`），统一走 `GetEntryFolderId` / `GetEntryName` 兜底
+- NapCat 的 `file_id` 是它自己内存编码的临时标识（约 24 小时、NapCat 重启即失效），拿旧 id 操作会报 `real fileUUID not found!`，现在会把「重新搜索拿最新 id」一并提示；LLOneBot 与 SnowLuma 用 NTQQ 原生 fileId，跨端稳定
+- 删除文件失败逐条带原因汇报，不再只报「N 个删除失败」
 
 ## 与 KiraAI 原版的差异
 - 群号改为函数参数显式传入（Alife 的 XmlFunction 无会话上下文），AI 从 QChat 群聊上下文取值
