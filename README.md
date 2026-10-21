@@ -4,7 +4,7 @@
 QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文件列表/搜索/重命名/文件夹管理/删除/移动/异步下载。所有操作通过 OneBot 正向 WebSocket 直发协议端（常驻接收循环 + 断线重连），自动适配 NapCat、LLOneBot 与 SnowLuma 的接口差异。
 
 ## 版本
-4.1.0（对应 Alife 客户端 4.2.x）
+4.1.1（对应 Alife 客户端 4.2.x）
 
 ## 依赖
 - Alife.Function.FunctionCaller
@@ -56,7 +56,10 @@ QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文�
 - **文件夹重命名**动作名是 `rename_group_file_folder`（此前用的 `rename_group_folder` 三端都不存在，等于从来没生效过），NapCat 未实现该接口，会明确报「X 未实现该接口」
 - **文件重命名**三端都支持，参数固定 `file_id` + `current_parent_directory` + `new_name`（不再盲试 `new_file_name` 这类不存在的变体）
 - SnowLuma 的删除文件夹注册名是 `delete_group_file_folder`，`delete_group_folder` 是它的别名，现名可用
-- `delete_group_file` 的 `busid` 只有 LLOneBot 收，且可选（默认 102），无需补传
+- `delete_group_file` 只发 `group_id` + `file_id` 就能在三端通过（SnowLuma 的 `busid` 是 `f.raw()` 可选，缺省按 102 处理）
+- **下载链接必须带上文件条目自己的 `busid`**：同一个群里 102 和 104 都真实出现过，SnowLuma 缺省时钉死 102，拿 104 的文件去下载就会失败；条目里没有才回落 102
+- **列目录/移动/重命名时的根目录一律送 `"/"`**：三端写法不一致——LLOneBot 实测 `folder_id` 传空串回**空列表**（不是根目录），传 `"/"` 才是根目录；SnowLuma 用 `folder_id || folder || "/"`，且它的 `move_group_file` 两个目录字段是非空字符串，传空会 retcode 1400；NapCat 读 `folder ?? folder_id ?? ''`。插件统一 `NormalizeFolderParam`（剥前导斜杠、空则 `"/"`），LLOneBot 那种带前导斜杠的 id 也能用
+- 失败原因同时读 `message` 与 `wording`：SnowLuma 的失败包只填 `wording`，只读 `message` 会让它所有报错都显示成「未知错误」，连 `folder_id is required` 这种参数级原因都被丢掉
 - 文件/文件夹定位字段两端不一致（NapCat 文件夹回 `folder`，其余回 `folder_id`；名称 `name` / `file_name`），统一走 `GetEntryFolderId` / `GetEntryName` 兜底
 - NapCat 的 `file_id` 是它自己内存编码的临时标识（约 24 小时、NapCat 重启即失效），拿旧 id 操作会报 `real fileUUID not found!`，现在会把「重新搜索拿最新 id」一并提示；LLOneBot 与 SnowLuma 用 NTQQ 原生 fileId，跨端稳定
 - 删除文件失败逐条带原因汇报，不再只报「N 个删除失败」

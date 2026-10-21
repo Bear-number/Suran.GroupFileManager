@@ -363,9 +363,16 @@ public class GroupFileManagerModule(
         bool succeeded = status == "ok" || status == "async" || retcode == 0;
         if (succeeded == false)
         {
-            string detail = root.TryGetProperty("message", out JsonElement messageElement) && messageElement.ValueKind == JsonValueKind.String
-                ? messageElement.GetString() ?? ""
-                : "未知错误";
+            // SnowLuma 的失败包只填 wording（LLOneBot/NapCat 两个键都填同一个值），只读 message 在 SnowLuma 下永远是「未知错误」
+            string detail = GetStringField(root, "message");
+            if (detail.Length == 0)
+            {
+                detail = GetStringField(root, "wording");
+            }
+            if (detail.Length == 0)
+            {
+                detail = "未知错误";
+            }
             // 1404 = 动作名在该协议端不存在（三端都有的接口不多，文件夹重命名只有 LLOneBot/SnowLuma 有）
             if (retcode == 1404)
             {
@@ -495,10 +502,18 @@ public class GroupFileManagerModule(
         return (files, folders);
     }
 
+    // 根目录写法三端不一致：LLOneBot 实测 folder_id 传空串回空列表（不是根目录），SnowLuma 用
+    // folder_id || folder || "/"，NapCat 用 folder ?? folder_id ?? ""。只有 "/" 是三端都认的根目录。
+    static string NormalizeFolderParam(string? folderId)
+    {
+        string trimmed = (folderId ?? "").TrimStart('/');
+        return trimmed.Length > 0 ? trimmed : "/";
+    }
+
     // 获取文件夹内的文件，带5秒缓存与重试
     async Task<List<JsonElement>> GetFolderFilesAsync(long groupId, string folderId, int retryCount = 2, int? fileCount = null)
     {
-        string cleanFolderId = (folderId ?? "").TrimStart('/');
+        string cleanFolderId = NormalizeFolderParam(folderId);
         string cacheKey = groupId + "_" + cleanFolderId + "_" + (fileCount.HasValue ? fileCount.Value.ToString() : "default");
         if (folderCache.TryGetValue(cacheKey, out (DateTime CachedTime, List<JsonElement> Files) cached)
             && (DateTime.Now - cached.CachedTime).TotalSeconds < 5)
@@ -882,8 +897,8 @@ public class GroupFileManagerModule(
     async Task<(bool Success, string Message)> MoveFileAsync(
         long groupId, string fileUuid, string currentFolderId, string targetFolderId, string fileName)
     {
-        string cleanCurrent = currentFolderId == "/" ? "/" : currentFolderId.TrimStart('/');
-        string cleanTarget = targetFolderId == "/" ? "/" : targetFolderId.TrimStart('/');
+        string cleanCurrent = NormalizeFolderParam(currentFolderId);
+        string cleanTarget = NormalizeFolderParam(targetFolderId);
 
         // 已经试出来的格式不再浪费一次失败；否则按协议端排首选，两种都留一次机会
         // （配置填错端时也能靠回退成功，不至于把移动功能锁死）
@@ -1333,7 +1348,7 @@ public class GroupFileManagerModule(
             return;
         }
 
-        string cleanDirectory = parentFolderId == "/" ? "/" : parentFolderId.TrimStart('/');
+        string cleanDirectory = NormalizeFolderParam(parentFolderId);
         // 三端一致：rename_group_file 收 file_id + current_parent_directory + new_name
         JsonObject parameters = new()
         {
@@ -1452,7 +1467,7 @@ public class GroupFileManagerModule(
         string taskId = groupId + "_" + fileName + "_" + DateTimeOffset.Now.ToUnixTimeSeconds();
         DownloadTaskRecord record = new() { Status = "pending", FileName = fileName };
         pendingDownloadTasks[taskId] = record;
-        _ = Task.Run(() => RunDownloadTaskAsync(taskId, groupId, fileName, fileEntry.FileId), DestroyCancellationToken);
+        _ = Task.Run(() => RunDownloadTaskAsync(taskId, groupId, fileName, fileEntry.FileId, fileEntry.Busid), DestroyCancellationToken);
         interactor.Poke("✅ 已开始下载: " + fileName + "\n📋 任务ID: " + taskId + "\n⏳ 下载完成后我会通知你~");
     }
 
@@ -1485,7 +1500,7 @@ public class GroupFileManagerModule(
     // 下载实现
     // ============================================================
 
-    async Task RunDownloadTaskAsync(string taskId, long groupId, string fileName, string fileId)
+    async Task RunDownloadTaskAsync(string taskId, long groupId, string fileName, string fileId, long busid)
     {
         DownloadTaskRecord record = pendingDownloadTasks[taskId];
         try
@@ -1493,7 +1508,9 @@ public class GroupFileManagerModule(
             JsonObject urlParameters = new()
             {
                 ["group_id"] = groupId,
-                ["file_id"] = fileId
+                ["file_id"] = fileId,
+                // busid 是文件条目自带的业务号（同群里 102/104 都出现过），拿不到时按各端默认的 102
+                ["busid"] = busid > 0 ? busid : 102
             };
             string urlResponse = await CallActionAsync("get_group_file_url", urlParameters);
             JsonElement urlData = ParseActionResponse(urlResponse, "获取下载链接");
