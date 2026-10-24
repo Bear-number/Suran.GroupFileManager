@@ -4,7 +4,11 @@
 QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文件列表/搜索/重命名/文件夹管理/删除/移动/异步下载。所有操作通过 OneBot 正向 WebSocket 直发协议端（常驻接收循环 + 断线重连），自动适配 NapCat、LLOneBot 与 SnowLuma 的接口差异。
 
 ## 版本
-4.1.1（对应 Alife 客户端 4.2.x）
+5.0.0（对应 Alife 客户端 5.0.x；本机 5.0.2 在役客户端已热编译装载成功）
+
+## 5.0.0 的改动
+- 版本号对齐客户端主版本（官方约定：插件版本首位应与客户端一致，`PluginSystem.IsClientCompatible` 按主版本判定）
+- 只走 OneBot HTTP 动作，未涉及外部程序与平台 API；本版只做版本对齐与在役客户端装载确认
 
 ## 依赖
 - Alife.Function.FunctionCaller
