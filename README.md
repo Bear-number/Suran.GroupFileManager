@@ -16,7 +16,8 @@ QQ 群文件管家，移植自 KiraAI 的 qq_file_manager，功能对齐：文�
 ## 配置
 | 键 | 默认 | 说明 |
 |---|---|---|
-| OneBotWsUrl | ws://127.0.0.1:3001 | OneBot 正向 WebSocket 地址 |
+| OneBotWsUrl | 空 | OneBot 正向 WebSocket 地址。**留空 = 自动跟随「QQ 聊天」插件**的配置 |
+| OneBotToken | 空 | 协议端访问令牌。留空 = 跟随「QQ 聊天」插件 |
 | MaxFilesList | 20 | 列出/搜索时最多显示条数 |
 | DebugMode | 关 | 调试日志（API调用/搜索/缓存过程） |
 | ApiProvider | auto | 协议端类型：auto 自动识别 / napcat / llonebot / snowluma（影响移动文件接口参数格式） |

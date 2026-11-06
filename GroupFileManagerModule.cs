@@ -23,8 +23,12 @@ public class GroupFileManagerConfig
 {
     // ---- 基础设置 ----
     [DisplayName("基础·协议端地址")]
-    [Description("OneBot正向WebSocket地址（NapCat/LLOneBot等），默认 ws://127.0.0.1:3001")]
-    public string OneBotWsUrl { get; set; } = "ws://127.0.0.1:3001";
+    [Description("留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001")]
+    public string OneBotWsUrl { get; set; } = "";
+
+    [DisplayName("基础·访问令牌")]
+    [Description("与协议端配置的 token 一致。留空 = 跟随「QQ 聊天」插件。填了地址却没填这里，协议端一开 token 就会连不上")]
+    public string OneBotToken { get; set; } = "";
 
     [DisplayName("基础·列表最大条数")]
     [Description("列出/搜索文件时最多显示的条目数量")]
@@ -35,7 +39,7 @@ public class GroupFileManagerConfig
     public bool DebugMode { get; set; } = false;
 
     [DisplayName("基础·协议端类型")]
-    [Description("auto=自动探测（默认）/ napcat / llonebot / snowluma。影响移动文件接口的参数格式：NapCat 用 current/target_parent_directory，LLOneBot 与 SnowLuma 用 parent/target_directory")]
+    [Description("协议端类型，auto 自动探测，也可指定 napcat / llonebot / snowluma。")]
     public string ApiProvider { get; set; } = "auto";
 
     // ---- 下载设置 ----
@@ -99,7 +103,8 @@ public class GroupFileManagerConfig
 
 [Module("群文件管家",
     "QQ群文件管理：列表/搜索/重命名/文件夹/删除/移动/异步下载，黑白名单双权限模式，自动适配NapCat、LLOneBot与SnowLuma",
-    defaultCategory: "苏染的工具")]
+    defaultCategory: "苏染的工具",
+    EditorUI = typeof(GroupFileManagerUI))]
 public class GroupFileManagerModule(
     XmlFunctionCaller functionCaller,
     ILogger<GroupFileManagerModule> logger,
@@ -107,6 +112,66 @@ public class GroupFileManagerModule(
 ) : ChatBehaviour, IConfigurable<GroupFileManagerConfig>
 {
     public GroupFileManagerConfig Configuration { get; set; } = null!;
+
+    /// <summary>
+    /// 协议端连接信息。
+    ///
+    /// 地址留空时跟随「QQ 聊天」插件的配置——那是唯一值得人填一次的地方。
+    /// 换端口、给协议端开 token，都不用回来改这个插件，读它的配置就够。
+    /// 读不到就退回上一个版本的默认值，行为和以前完全一致。
+    /// </summary>
+    (string Url, string Token, string Source) ResolveOneBot()
+    {
+        string url = (Configuration.OneBotWsUrl ?? "").Trim();
+        string token = (Configuration.OneBotToken ?? "").Trim();
+
+        if (url.Length > 0)
+            return (url, token, "本插件");
+
+        // 按角色存，所以换角色读的是那个角色自己的 QQ 配置——不同角色可能是不同 bot 账号，这是对的。
+        // 第二条是兜底：StorageFolderPath 若已含角色层、或 StorageKey 为空，靠第一条拼不出来。
+        string[] candidates =
+        [
+            Path.Combine(AlifePath.StorageFolderPath, Character.StorageKey,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+            Path.Combine(AlifePath.StorageFolderPath,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+        ];
+
+        foreach (string path in candidates)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+                string sharedUrl = document.RootElement.TryGetProperty("Url", out JsonElement u) ? u.GetString() ?? "" : "";
+                string sharedToken = document.RootElement.TryGetProperty("Token", out JsonElement t) ? t.GetString() ?? "" : "";
+                if (sharedUrl.Trim().Length > 0)
+                    return (sharedUrl.Trim(), token.Length > 0 ? token : sharedToken.Trim(), "QQ 聊天插件");
+            }
+            catch (Exception)
+            {
+                // 这个候选读不了就试下一个。配置坏了也不该让发消息失败在读取配置上
+            }
+        }
+
+        return ("ws://127.0.0.1:3001", token, "默认");
+    }
+
+    /// <summary>
+    /// 建连并鉴权。
+    /// token 必须在 ConnectAsync 之前写进请求头——连上之后 ClientWebSocket 不允许再改 Options。
+    /// </summary>
+    async Task ConnectOneBotAsync(ClientWebSocket connection, CancellationToken cancellationToken)
+    {
+        (string url, string token, _) = ResolveOneBot();
+        if (token.Length > 0)
+            connection.Options.SetRequestHeader("Authorization", "Bearer " + token);
+        await connection.ConnectAsync(new Uri(url), cancellationToken);
+    }
+
 
     // 单次向协议端拉取的文件数量（get_group_*files 的 file_count 参数）
     const int SearchFileCount = 200;
@@ -233,10 +298,10 @@ public class GroupFileManagerModule(
                     sharedConnection?.Dispose();
                     ClientWebSocket connection = new();
                     using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                    await connection.ConnectAsync(new Uri(Configuration.OneBotWsUrl), connectTimeout.Token);
+                    await ConnectOneBotAsync(connection, connectTimeout.Token);
                     sharedConnection = connection;
                     connectionReady.TrySetResult(true);
-                    LogDebug("协议端已连接：" + Configuration.OneBotWsUrl);
+                    LogDebug("协议端已连接：" + ResolveOneBot().Url);
                     await ReceiveLoopCoreAsync(connection);
                 }
                 catch (Exception loopError)
@@ -319,7 +384,7 @@ public class GroupFileManagerModule(
                 sharedConnection?.Dispose();
                 ClientWebSocket connection = new();
                 using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-                await connection.ConnectAsync(new Uri(Configuration.OneBotWsUrl), connectTimeout.Token);
+                await ConnectOneBotAsync(connection, connectTimeout.Token);
                 sharedConnection = connection;
                 connectionReady.TrySetResult(true);
             }
