@@ -103,7 +103,7 @@ public class GroupFileManagerConfig
 
 [Module("群文件管家",
     "QQ群文件管理：列表/搜索/重命名/文件夹/删除/移动/异步下载，黑白名单双权限模式，自动适配NapCat、LLOneBot与SnowLuma",
-    defaultCategory: "苏染的工具",
+    defaultCategory: "苏染的工具/QQ与群管理",
     EditorUI = typeof(GroupFileManagerUI))]
 public class GroupFileManagerModule(
     XmlFunctionCaller functionCaller,
