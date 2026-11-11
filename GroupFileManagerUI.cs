@@ -13,6 +13,6 @@ public sealed class GroupFileManagerUI : ModuleUIBase<GroupFileManagerModule, Gr
             b.AddContent(0, "配置未加载");
             return;
         }
-        SuranUiKit.Render(this, StateHasChanged, b, Configuration, "群文件管家", "群文件列表、搜索、重命名、删除、移动与下载；黑白名单双权限", "#0ea5e9");
+        SuranUiKit.Render(this, StateHasChanged, b, Configuration, "群文件管家", "群文件列表、搜索、重命名、删除、移动与下载；黑白名单双权限");
     }
 }
