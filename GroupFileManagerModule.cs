@@ -63,6 +63,24 @@ public class GroupFileManagerConfig
     [Description("下载超时时间")]
     public int DownloadTimeoutSeconds { get; set; } = 60;
 
+    // ---- 上传设置 ----
+    [DisplayName("上传·大小上限(MB)")]
+    [Description("允许上传到群文件的本地文件最大体积，0为不限制，默认200")]
+    public int MaxUploadSizeMb { get; set; } = 200;
+
+    [DisplayName("上传·扩展名白名单")]
+    [Description("允许上传的扩展名，英文逗号分隔（如 pdf,jpg,zip），留空允许所有类型")]
+    public string UploadAllowedExtensions { get; set; } = "";
+
+    // ---- 预览与归档 ----
+    [DisplayName("预览·最大 KB")]
+    [Description("在线预览群文件时最多读取的大小（KB），默认512。超出部分不读取，仅支持文本类文件")]
+    public int PreviewMaxKb { get; set; } = 512;
+
+    [DisplayName("归档·规则")]
+    [Description("自动归档规则，格式 扩展名=文件夹名，多条用英文分号分隔，例如 pdf,docx=文档;jpg,png=图片;zip,7z=压缩包。留空则自动归档功能不可用")]
+    public string ArchiveRules { get; set; } = "";
+
     // ---- 权限设置 ----
     [DisplayName("权限·权限模式")]
     [Description("deny_list=黑名单（默认，所有群可用按需禁用）/ allow_list=白名单（仅允许名单内的群）")]
@@ -103,13 +121,17 @@ public class GroupFileManagerConfig
     [DisplayName("权限·禁用查看列表的群")]
     [Description("群号英文逗号分隔，填 all 全局禁用；同时控制搜索功能")]
     public string DisabledListFiles { get; set; } = "";
+
+    [DisplayName("权限·禁用上传的群")]
+    [Description("群号英文逗号分隔，填 all 全局禁用，留空不限制")]
+    public string DisabledUploadFile { get; set; } = "";
 }
 
 [Module("群文件管家",
     "QQ群文件管理：列表/搜索/重命名/文件夹/删除/移动/异步下载，黑白名单双权限模式，自动适配NapCat、LLOneBot与SnowLuma",
     defaultCategory: "苏染的工具/QQ与群管理",
     EditorUI = typeof(GroupFileManagerUI))]
-public class GroupFileManagerModule(
+public partial class GroupFileManagerModule(
     XmlFunctionCaller functionCaller,
     ILogger<GroupFileManagerModule> logger,
     Interactor<GroupFileManagerModule> interactor
@@ -493,6 +515,7 @@ public class GroupFileManagerModule(
 
         string disabledRaw = feature switch
         {
+            "upload_file" => Configuration.DisabledUploadFile,
             "create_folder" => Configuration.DisabledCreateFolder,
             "delete_folder" => Configuration.DisabledDeleteFolder,
             "delete_file" => Configuration.DisabledDeleteFile,
@@ -508,6 +531,7 @@ public class GroupFileManagerModule(
         {
             string featureName = feature switch
             {
+                "upload_file" => "上传文件",
                 "create_folder" => "创建文件夹",
                 "delete_folder" => "删除文件夹",
                 "delete_file" => "删除文件",
@@ -1306,16 +1330,27 @@ public class GroupFileManagerModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("移动QQ群文件到指定文件夹，folderName填'根目录'或'/'表示移动到根目录")]
+    [Description("移动QQ群文件到指定文件夹，folderName填'根目录'或'/'表示移动到根目录。优先用fileId，没给再按文件名定位")]
     public async Task MoveGroupFile(
         [Description("QQ群号")] long groupId,
-        [Description("要移动的文件名")] string fileName,
-        [Description("目标文件夹名称，'根目录'或'/'表示根目录")] string folderName)
+        [Description("要移动的文件名（使用fileId时可传空字符串）")] string fileName,
+        [Description("目标文件夹名称，'根目录'或'/'表示根目录")] string folderName,
+        [Description("文件ID（来自列表/搜索结果，优先使用）")] string? fileId = null)
     {
         if (CheckFeaturePermission(groupId, "move_file") == false)
         {
             return;
         }
+        (FileEntry? Resolved, string Error) resolvedFile = await ResolveFileEntryAsync(groupId, fileId, fileName);
+        if (resolvedFile.Resolved == null)
+        {
+            interactor.Poke(resolvedFile.Error);
+            return;
+        }
+        FileEntry fileEntry = resolvedFile.Resolved;
+        string displayName = fileEntry.FileName.Length > 0
+            ? fileEntry.FileName
+            : (string.IsNullOrWhiteSpace(fileName) ? (fileId ?? "") : fileName);
         string targetFolderId = "/";
         if (folderName != "根目录" && folderName != "/" && folderName.Length > 0)
         {
@@ -1326,19 +1361,13 @@ public class GroupFileManagerModule(
                 return;
             }
         }
-        FileEntry? fileEntry = await FindFileInAllFoldersAsync(groupId, fileName);
-        if (fileEntry == null || fileEntry.FileUuid.Length == 0)
-        {
-            interactor.Poke("❌ 未找到文件: " + fileName);
-            return;
-        }
         (bool Success, string Message) moveResult = await MoveFileAsync(
-            groupId, fileEntry.FileUuid, fileEntry.LocationFolderId, targetFolderId, fileName);
+            groupId, fileEntry.FileUuid, fileEntry.LocationFolderId, targetFolderId, displayName);
         if (moveResult.Success)
         {
             ClearCache(groupId);
             string destination = targetFolderId == "/" ? "根目录" : "文件夹 '" + folderName + "'";
-            interactor.Poke("✅ 文件 '" + fileName + "' 已移动到" + destination);
+            interactor.Poke("✅ 文件 '" + displayName + "' 已移动到" + destination);
             return;
         }
         interactor.Poke("❌ " + moveResult.Message);
@@ -1367,57 +1396,18 @@ public class GroupFileManagerModule(
             interactor.Poke("❌ 新文件名不能包含路径分隔符");
             return;
         }
-        string targetFileId;
-        string parentFolderId;
-        string oldName;
-        if (string.IsNullOrEmpty(fileId) == false)
+        (FileEntry? Resolved, string Error) resolvedFile = await ResolveFileEntryAsync(groupId, fileId, fileName);
+        if (resolvedFile.Resolved == null)
         {
-            // 按ID定位：扫描全群找到该ID实际所在文件夹，作为重命名所需父目录
-            (List<FileEntry> Files, string Scope) collected = await CollectGroupFilesAsync(groupId, null);
-            FileEntry? located = collected.Files.FirstOrDefault(entry => entry.FileId == fileId);
-            if (located != null)
-            {
-                targetFileId = located.FileId;
-                parentFolderId = located.LocationFolderId.Length > 0 ? located.LocationFolderId : "/";
-                oldName = located.FileName.Length > 0 ? located.FileName : fileId;
-            }
-            else
-            {
-                // 未扫到该ID（可能在更深层目录），按根目录重试
-                targetFileId = fileId;
-                parentFolderId = "/";
-                oldName = fileId;
-            }
-        }
-        else if (string.IsNullOrEmpty(fileName) == false)
-        {
-            List<FileEntry> matches = await FindFileMatchesAllAsync(groupId, fileName);
-            if (matches.Count == 0)
-            {
-                interactor.Poke("❌ 未找到文件: " + fileName);
-                return;
-            }
-            if (matches.Count > 1)
-            {
-                StringBuilder ambiguity = new();
-                ambiguity.Append("❌ 群内存在 ").Append(matches.Count).Append(" 个同名文件「").Append(fileName)
-                    .Append("」，请用 fileId 精确指定：");
-                foreach (FileEntry match in matches)
-                {
-                    ambiguity.Append("\n  - 🆔 ").Append(match.FileId).Append("（位于 ").Append(match.Location).Append("）");
-                }
-                interactor.Poke(ambiguity.ToString());
-                return;
-            }
-            targetFileId = matches[0].FileId;
-            parentFolderId = matches[0].LocationFolderId;
-            oldName = fileName;
-        }
-        else
-        {
-            interactor.Poke("❌ 请提供 fileId 或 fileName");
+            interactor.Poke(resolvedFile.Error);
             return;
         }
+        FileEntry resolvedEntry = resolvedFile.Resolved;
+        string targetFileId = resolvedEntry.FileId.Length > 0 ? resolvedEntry.FileId : resolvedEntry.FileUuid;
+        string parentFolderId = resolvedEntry.LocationFolderId.Length > 0 ? resolvedEntry.LocationFolderId : "/";
+        string oldName = resolvedEntry.FileName.Length > 0
+            ? resolvedEntry.FileName
+            : (string.IsNullOrWhiteSpace(fileName) ? (fileId ?? "") : fileName);
 
         string cleanDirectory = NormalizeFolderParam(parentFolderId);
         // 三端一致：rename_group_file 收 file_id + current_parent_directory + new_name
@@ -1514,32 +1504,41 @@ public class GroupFileManagerModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("下载QQ群文件到本地（异步），完成后会主动通知。受扩展名白名单与大小上限约束")]
+    [Description("下载QQ群文件到本地（异步），完成后会主动通知。受扩展名白名单与大小上限约束。优先用fileId，没给再按文件名定位")]
     public async Task DownloadGroupFile(
         [Description("QQ群号")] long groupId,
-        [Description("要下载的文件名")] string fileName)
+        [Description("要下载的文件名（使用fileId时可传空字符串）")] string fileName,
+        [Description("文件ID（来自列表/搜索结果，优先使用）")] string? fileId = null)
     {
         if (CheckFeaturePermission(groupId, "download_file") == false)
         {
             return;
         }
-        FileEntry? fileEntry = await FindFileInAllFoldersAsync(groupId, fileName);
-        if (fileEntry == null || fileEntry.FileId.Length == 0)
+        (FileEntry? Resolved, string Error) resolvedFile = await ResolveFileEntryAsync(groupId, fileId, fileName);
+        if (resolvedFile.Resolved == null)
         {
-            interactor.Poke("❌ 未找到文件: " + fileName);
+            interactor.Poke(resolvedFile.Error);
             return;
         }
-        string rejection = CheckDownloadAllowed(fileName, fileEntry.Size);
+        FileEntry fileEntry = resolvedFile.Resolved;
+        string actualName = fileEntry.FileName.Length > 0
+            ? fileEntry.FileName
+            : (string.IsNullOrWhiteSpace(fileName) ? "" : fileName.Trim());
+        if (actualName.Length == 0)
+        {
+            actualName = "群文件_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+        }
+        string rejection = CheckDownloadAllowed(actualName, fileEntry.Size);
         if (rejection.Length > 0)
         {
             interactor.Poke(rejection);
             return;
         }
-        string taskId = groupId + "_" + fileName + "_" + DateTimeOffset.Now.ToUnixTimeSeconds();
-        DownloadTaskRecord record = new() { Status = "pending", FileName = fileName };
+        string taskId = groupId + "_" + actualName + "_" + DateTimeOffset.Now.ToUnixTimeSeconds();
+        DownloadTaskRecord record = new() { Status = "pending", FileName = actualName, CreatedAt = DateTime.Now };
         pendingDownloadTasks[taskId] = record;
-        _ = Task.Run(() => RunDownloadTaskAsync(taskId, groupId, fileName, fileEntry.FileId, fileEntry.Busid), DestroyCancellationToken);
-        interactor.Poke("✅ 已开始下载: " + fileName + "\n📋 任务ID: " + taskId + "\n⏳ 下载完成后我会通知你~");
+        _ = Task.Run(() => RunDownloadTaskAsync(taskId, groupId, actualName, fileEntry.FileId, fileEntry.Busid), DestroyCancellationToken);
+        interactor.Poke("✅ 已开始下载: " + actualName + "\n📋 任务ID: " + taskId + "\n⏳ 下载完成后我会通知你~");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1855,5 +1854,6 @@ public class GroupFileManagerModule(
         public string SavePath { get; set; } = "";
         public long FileSize { get; set; }
         public string ErrorMessage { get; set; } = "";
+        public DateTime CreatedAt { get; set; } = DateTime.Now;
     }
 }
