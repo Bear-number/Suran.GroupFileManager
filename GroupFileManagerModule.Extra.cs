@@ -45,7 +45,7 @@ public partial class GroupFileManagerModule
 
     long PreviewMaxBytes => Math.Max(1, Configuration.PreviewMaxKb) * 1024L;
 
-    static List<string> ParseExtensionList(string? raw)
+    static List<string> ParseExtensionList(string raw)
     {
         return (raw ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -55,7 +55,7 @@ public partial class GroupFileManagerModule
     }
 
     // 归档规则：pdf,docx=文档;jpg,png=图片;zip,7z=压缩包
-    static List<(HashSet<string> Extensions, string FolderName)> ParseArchiveRules(string? raw)
+    static List<(HashSet<string> Extensions, string FolderName)> ParseArchiveRules(string raw)
     {
         List<(HashSet<string> Extensions, string FolderName)> rules = new();
         foreach (string ruleText in (raw ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -93,7 +93,7 @@ public partial class GroupFileManagerModule
     // fileId 或唯一文件名 → 文件对象（移动/重命名/下载/预览共用）
     // ============================================================
 
-    async Task<(FileEntry? Resolved, string Error)> ResolveFileEntryAsync(long groupId, string? fileId, string? fileName)
+    async Task<(FileEntry Resolved, string Error)> ResolveFileEntryAsync(long groupId, string fileId, string fileName)
     {
         string id = (fileId ?? "").Trim();
         string name = (fileName ?? "").Trim();
@@ -102,7 +102,7 @@ public partial class GroupFileManagerModule
         {
             // 扫根目录+一级文件夹定位该 ID 的实际父目录（移动/重命名需要）
             (List<FileEntry> Files, string Scope) collected = await CollectGroupFilesAsync(groupId, null);
-            FileEntry? located = collected.Files.FirstOrDefault(entry => entry.FileId == id || entry.FileUuid == id);
+            FileEntry located = collected.Files.FirstOrDefault(entry => entry.FileId == id || entry.FileUuid == id);
             if (located != null)
             {
                 return (located, "");
@@ -152,9 +152,9 @@ public partial class GroupFileManagerModule
     public async Task UploadGroupFile(
         [Description("QQ群号")] long groupId,
         [Description("本地文件路径（协议端所在机器可访问的路径，最好用绝对路径）")] string localPath,
-        [Description("目标文件夹ID，留空=根目录")] string? folderId = null,
-        [Description("目标文件夹名称（与folderId二选一，会自动解析成ID）")] string? folderName = null,
-        [Description("上传后的文件名，留空用本地文件名")] string? remoteName = null)
+        [Description("目标文件夹ID，留空=根目录")] string folderId = null,
+        [Description("目标文件夹名称（与folderId二选一，会自动解析成ID）")] string folderName = null,
+        [Description("上传后的文件名，留空用本地文件名")] string remoteName = null)
     {
         if (CheckFeaturePermission(groupId, "upload_file") == false)
         {
@@ -192,8 +192,8 @@ public partial class GroupFileManagerModule
     public async Task UploadGroupFiles(
         [Description("QQ群号")] long groupId,
         [Description("本地文件路径列表，英文逗号分隔")] string localPaths,
-        [Description("目标文件夹ID，留空=根目录")] string? folderId = null,
-        [Description("目标文件夹名称（与folderId二选一）")] string? folderName = null)
+        [Description("目标文件夹ID，留空=根目录")] string folderId = null,
+        [Description("目标文件夹名称（与folderId二选一）")] string folderName = null)
     {
         if (CheckFeaturePermission(groupId, "upload_file") == false)
         {
@@ -258,7 +258,7 @@ public partial class GroupFileManagerModule
     }
 
     // 目标文件夹：folderId 优先，folderName 解析成 ID；留空=根目录
-    async Task<(string FolderId, string Error)> ResolveUploadFolderAsync(long groupId, string? folderId, string? folderName)
+    async Task<(string FolderId, string Error)> ResolveUploadFolderAsync(long groupId, string folderId, string folderName)
     {
         string direct = (folderId ?? "").Trim();
         if (direct.Length > 0 && direct != "/")
@@ -275,7 +275,7 @@ public partial class GroupFileManagerModule
     }
 
     // 上传前置校验：存在、大小、扩展名、远程名；返回空错误串表示通过
-    (bool Ok, string FullPath, string RemoteName, string Error) PrepareUploadSource(string? localPath, string? remoteName)
+    (bool Ok, string FullPath, string RemoteName, string Error) PrepareUploadSource(string localPath, string remoteName)
     {
         string trimmed = (localPath ?? "").Trim().Trim('"');
         if (trimmed.Length == 0)
@@ -698,8 +698,8 @@ public partial class GroupFileManagerModule
     [Description("在线预览QQ群里的文本文件（txt/md/csv/json/log/xml/yml等）：下载到临时目录后只读前若干行/字符，用完即删。二进制文件请改用 DownloadGroupFile")]
     public async Task PreviewGroupFile(
         [Description("QQ群号")] long groupId,
-        [Description("文件名（与fileId二选一）")] string? fileName = null,
-        [Description("文件ID（优先使用）")] string? fileId = null,
+        [Description("文件名（与fileId二选一）")] string fileName = null,
+        [Description("文件ID（优先使用）")] string fileId = null,
         [Description("最多预览行数，默认60")] int lines = 60,
         [Description("最多预览字符数，默认4000")] int maxChars = 4000)
     {
@@ -707,7 +707,7 @@ public partial class GroupFileManagerModule
         {
             return;
         }
-        (FileEntry? Resolved, string Error) resolvedFile = await ResolveFileEntryAsync(groupId, fileId, fileName);
+        (FileEntry Resolved, string Error) resolvedFile = await ResolveFileEntryAsync(groupId, fileId, fileName);
         if (resolvedFile.Resolved == null)
         {
             interactor.Poke(resolvedFile.Error);
@@ -726,7 +726,7 @@ public partial class GroupFileManagerModule
         int charLimit = Math.Clamp(maxChars, 100, 20000);
         long byteLimit = PreviewMaxBytes;
 
-        string? tempPath = null;
+        string tempPath = null;
         try
         {
             JsonObject urlParameters = new()
@@ -789,7 +789,7 @@ public partial class GroupFileManagerModule
                 int lineNumber = 0;
                 while (lineNumber < lineLimit)
                 {
-                    string? line = await reader.ReadLineAsync();
+                    string line = await reader.ReadLineAsync();
                     if (line == null)
                     {
                         break;
@@ -941,7 +941,7 @@ public partial class GroupFileManagerModule
             string targetFolderId;
             try
             {
-                if (folderIds.TryGetValue(group.Key, out string? cachedId) == false)
+                if (folderIds.TryGetValue(group.Key, out string cachedId) == false)
                 {
                     (string FolderId, bool Created) ensured = await EnsureFolderAsync(groupId, group.Key);
                     cachedId = ensured.FolderId;
