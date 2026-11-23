@@ -597,67 +597,6 @@ public partial class GroupFileManagerModule(
         return entry;
     }
 
-    // 在指定文件夹（null=根目录）内按文件名精确查找一个文件
-    async Task<FileEntry> FindFileInFolderAsync(long groupId, string fileName, string folderId)
-    {
-        List<JsonElement> files;
-        if (string.IsNullOrEmpty(folderId) == false)
-        {
-            files = await GetFolderFilesAsync(groupId, folderId);
-        }
-        else
-        {
-            (List<JsonElement> Files, List<JsonElement> Folders) root = await GetRootEntriesAsync(groupId);
-            files = root.Files;
-            folderId = "/";
-        }
-        foreach (JsonElement file in files)
-        {
-            if (GetEntryName(file) == fileName)
-            {
-                FileEntry entry = ToFileEntry(file, "根目录", folderId ?? "/");
-                if (folderId != "/" && string.IsNullOrEmpty(folderId) == false)
-                {
-                    string folderName = await GetFolderNameByIdAsync(groupId, folderId);
-                    entry.Location = folderName.Length > 0 ? folderName : folderId;
-                }
-                LogDebug("找到匹配文件: " + fileName);
-                return entry;
-            }
-        }
-        return null;
-    }
-
-    // 在根目录及所有一级文件夹中按文件名查找（找到即返回）
-    async Task<FileEntry> FindFileInAllFoldersAsync(long groupId, string fileName)
-    {
-        LogDebug("开始搜索文件: " + fileName);
-        FileEntry rootMatch = await FindFileInFolderAsync(groupId, fileName, null);
-        if (rootMatch != null)
-        {
-            return rootMatch;
-        }
-        (List<JsonElement> Files, List<JsonElement> Folders) root = await GetRootEntriesAsync(groupId);
-        foreach (JsonElement folder in root.Folders)
-        {
-            string folderId = GetEntryFolderId(folder);
-            if (folderId.Length == 0)
-            {
-                continue;
-            }
-            string folderName = GetEntryName(folder, "未知文件夹");
-            FileEntry match = await FindFileInFolderAsync(groupId, fileName, folderId);
-            if (match != null)
-            {
-                match.Location = folderName;
-                match.LocationFolderId = folderId;
-                return match;
-            }
-        }
-        LogDebug("未找到文件: " + fileName);
-        return null;
-    }
-
     // 查找群内所有与文件名完全一致的文件（根目录+一级文件夹），用于删除/重命名的同名歧义校验
     async Task<List<FileEntry>> FindFileMatchesAllAsync(long groupId, string fileName)
     {
