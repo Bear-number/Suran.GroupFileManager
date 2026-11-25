@@ -23,7 +23,7 @@ namespace Suran.GroupFileManager;
 public class GroupFileManagerConfig
 {
     [DisplayName("运行·功能文档常驻")]
-    [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群文件操作多是主人明确要求时用，默认关")]
+    [Description("开：功能说明常驻系统提示词，模型随时看得到工具；关：隐式加载省 token，模型先输出入口标签再读文档。群文件操作多是用户明确要求时用，默认关")]
     public bool DocumentAlwaysResident { get; set; } = false;
 
     // ---- 基础设置 ----
@@ -212,7 +212,7 @@ public partial class GroupFileManagerModule(
     {
         XmlHandler handler = new(this)
         {
-            Description = "QQ群文件管理工具集：查看/搜索/重命名/创建删除文件夹/删除移动文件/异步下载群文件。",
+            Description = "翻群文件时用：看列表、搜索、重命名、建删文件夹、删除移动文件、异步下载。",
             Explanation = "删除与移动等写操作需要Bot是群管理员。搜索结果带 file_id，可直接用于删除/移动/重命名。按文件名操作时同名文件多处存在会被拒绝并列出位置，防止误删。"
         };
         functionCaller.RegisterHandler(handler,
